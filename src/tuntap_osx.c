@@ -42,12 +42,15 @@ int tuntap_open (tuntap_dev *device /* ignored */,
     int i;
     char tap_device[N2N_OSX_TAPDEVICE_SIZE];
 
+    memset(device, 0, sizeof(*device));
+    device->fd = -1;
+
     for(i = 0; i < 255; i++) {
         snprintf(tap_device, sizeof(tap_device), "/dev/tap%d", i);
 
         device->fd = open(tap_device, O_RDWR);
-        if(device->fd > 0) {
-            traceEvent(TRACE_NORMAL, "Succesfully open %s", tap_device);
+        if(device->fd >= 0) {
+            traceEvent(TRACE_NORMAL, "Successfully opened %s", tap_device);
             break;
         }
     }
@@ -61,6 +64,8 @@ int tuntap_open (tuntap_dev *device /* ignored */,
         FILE *fd;
 
         device->ip_addr = inet_addr(device_ip);
+        device->device_mask = inet_addr(device_mask);
+        snprintf(device->dev_name, sizeof(device->dev_name), "tap%d", i);
 
         if(device_mac && device_mac[0] != '\0') {
             // FIXME - this is not tested. might be wrong syntax for OS X

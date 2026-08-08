@@ -84,7 +84,11 @@ static SOCKET open_socket_bind_internal (const n2n_sock_t *local_address,
 #endif
 
     sockopt = 1;
-    setsockopt(sock_fd, SOL_SOCKET, SO_REUSEADDR, (char *)&sockopt, sizeof(sockopt));
+    /* TCP listeners need quick rebinding; multicast UDP explicitly shares a
+     * port. Regular UDP sockets must remain exclusive so two edge processes
+     * cannot consume each other's replies on macOS. */
+    if((type != 0) || reuse_port)
+        setsockopt(sock_fd, SOL_SOCKET, SO_REUSEADDR, (char *)&sockopt, sizeof(sockopt));
 #ifdef SO_REUSEPORT /* no SO_REUSEPORT in Windows / old Linux versions */
     if(reuse_port
        && (setsockopt(sock_fd, SOL_SOCKET, SO_REUSEPORT,
