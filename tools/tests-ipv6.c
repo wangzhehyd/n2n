@@ -58,6 +58,8 @@ int main (void) {
     SOCKET server = -1;
     SOCKET client4 = -1;
     SOCKET client6 = -1;
+    SOCKET reuse1 = -1;
+    SOCKET reuse2 = -1;
     char byte = 'x';
     int failed = 0;
 
@@ -153,6 +155,21 @@ int main (void) {
     } else
         printf("IPv6 UDP receive: PASS\n");
 
+    reuse1 = open_socket_reuse_port(0, INADDR_ANY, 0);
+    actual_len = sizeof(actual);
+    if((reuse1 < 0)
+       || (getsockname(reuse1, (struct sockaddr *)&actual, &actual_len) != 0)
+       || (fill_n2nsock(&sock, (struct sockaddr *)&actual) != 0)
+       || ((reuse2 = open_socket_reuse_port(sock.port, INADDR_ANY, 0)) < 0)) {
+        printf("Reusable UDP port binding: FAIL\n");
+        failed = 1;
+    } else
+        printf("Reusable UDP port binding: PASS\n");
+
+    if(reuse2 >= 0)
+        closesocket(reuse2);
+    if(reuse1 >= 0)
+        closesocket(reuse1);
     if(client6 >= 0)
         closesocket(client6);
     if(client4 >= 0)

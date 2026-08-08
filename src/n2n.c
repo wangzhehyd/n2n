@@ -48,8 +48,9 @@
 
 /* ************************************** */
 
-SOCKET open_socket_bind (const n2n_sock_t *local_address,
-                         int type /* 0 = UDP, TCP otherwise */) {
+static SOCKET open_socket_bind_internal (const n2n_sock_t *local_address,
+                                         int type /* 0 = UDP, TCP otherwise */,
+                                         int reuse_port) {
 
     SOCKET sock_fd;
     struct sockaddr_storage local_sockaddr;
@@ -84,6 +85,15 @@ SOCKET open_socket_bind (const n2n_sock_t *local_address,
 
     sockopt = 1;
     setsockopt(sock_fd, SOL_SOCKET, SO_REUSEADDR, (char *)&sockopt, sizeof(sockopt));
+#ifdef SO_REUSEPORT /* no SO_REUSEPORT in Windows / old Linux versions */
+    if(reuse_port
+       && (setsockopt(sock_fd, SOL_SOCKET, SO_REUSEPORT,
+                      (char *)&sockopt, sizeof(sockopt)) != 0)) {
+        traceEvent(TRACE_WARNING, "Unable to enable UDP port reuse [%s]\n", strerror(errno));
+    }
+#else
+    (void)reuse_port;
+#endif
 
 #ifdef IPV6_V6ONLY
     if(local_address->family == AF_INET6) {
@@ -108,8 +118,16 @@ SOCKET open_socket_bind (const n2n_sock_t *local_address,
 }
 
 
-SOCKET open_socket (int local_port, in_addr_t address,
-                    int type /* 0 = UDP, TCP otherwise */) {
+SOCKET open_socket_bind (const n2n_sock_t *local_address,
+                         int type /* 0 = UDP, TCP otherwise */) {
+
+    return open_socket_bind_internal(local_address, type, 0 /* exclusive port */);
+}
+
+
+static SOCKET open_socket_internal (int local_port, in_addr_t address,
+                                    int type /* 0 = UDP, TCP otherwise */,
+                                    int reuse_port) {
 
     n2n_sock_t local_address;
     uint32_t address_network_order;
@@ -120,7 +138,21 @@ SOCKET open_socket (int local_port, in_addr_t address,
     address_network_order = htonl(address);
     memcpy(local_address.addr.v4, &address_network_order, IPV4_SIZE);
 
-    return open_socket_bind(&local_address, type);
+    return open_socket_bind_internal(&local_address, type, reuse_port);
+}
+
+
+SOCKET open_socket (int local_port, in_addr_t address,
+                    int type /* 0 = UDP, TCP otherwise */) {
+
+    return open_socket_internal(local_port, address, type, 0 /* exclusive port */);
+}
+
+
+SOCKET open_socket_reuse_port (int local_port, in_addr_t address,
+                               int type /* 0 = UDP, TCP otherwise */) {
+
+    return open_socket_internal(local_port, address, type, 1 /* reusable port */);
 }
 
 
