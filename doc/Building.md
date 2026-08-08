@@ -45,6 +45,28 @@ increasing security restrictions in the OS that make installing the TUN/TAP
 kernel extension difficult.  Alternative software implementations to avoid
 these difficulties are being discussed for future n2n versions.
 
+With the Xcode command line tools installed, n2n can be compiled without
+installing autoconf or automake:
+
+```bash
+xcode-select --install # only required once
+./scripts/hack_fakeautoconf_macos.sh
+make
+```
+
+The script detects Intel and Apple Silicon machines and generates the
+`config.mak` and `include/config.h` files required by the Makefiles. Existing
+`CC`, `CFLAGS`, `LDFLAGS`, `LDLIBS_EXTRA`, and `CONFIG_PREFIX` environment
+variables are preserved. For example, a universal binary can be requested
+with:
+
+```bash
+CFLAGS="-g -O2 -arch x86_64 -arch arm64" \
+LDFLAGS="-arch x86_64 -arch arm64" \
+./scripts/hack_fakeautoconf_macos.sh
+make
+```
+
 # Build on Windows
 
 The following document one possible windows compile recipe.  The reason

@@ -45,6 +45,13 @@ This shell script is used during development to help build on Windows
 systems.  An example of how to use it is shown in
 the [Building document](Building.md)
 
+### `hack_fakeautoconf_macos.sh`
+
+This shell script generates the configuration files needed to build on macOS
+without autoconf or automake. It supports Intel, Apple Silicon, and custom
+compiler flags for universal binaries. An example is shown in the
+[Building document](Building.md).
+
 ### `indent.sh`
 
 This shell script is a wrapper for the `uncrustify` C code style checker
