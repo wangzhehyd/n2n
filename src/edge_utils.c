@@ -57,6 +57,7 @@
 int resolve_create_thread (n2n_resolve_parameter_t **param, struct peer_info *sn_list);
 int resolve_check (n2n_resolve_parameter_t *param, uint8_t resolution_request, time_t now);
 int resolve_cancel_thread (n2n_resolve_parameter_t *param);
+void supernode_disconnect (n2n_edge_t *eee);
 
 static const char * supernode_ip (const n2n_edge_t * eee);
 static void send_register (n2n_edge_t *eee, const n2n_sock_t *remote_peer, const n2n_mac_t peer_mac, n2n_cookie_t cookie);
@@ -227,47 +228,80 @@ void reset_sup_attempts (n2n_edge_t *eee) {
 // detect local IP address by probing a connection to the supernode
 static int detect_local_ip_address (n2n_sock_t* out_sock, const n2n_edge_t* eee) {
 
-    struct sockaddr_in local_sock;
-    struct sockaddr_in sn_sock;
+    struct sockaddr_storage local_sock;
+    struct sockaddr_storage sn_sock;
     socklen_t sock_len = sizeof(local_sock);
+    socklen_t sn_sock_len;
+    n2n_sock_t bound_sock;
     SOCKET probe_sock;
-    int ret = 0;
+    uint16_t local_port;
 
+    memset(out_sock, 0, sizeof(*out_sock));
     out_sock->family = AF_INVALID;
 
-    // always detetct local port even/especially if chosen by OS...
-    if((getsockname(eee->sock, (struct sockaddr *)&local_sock, &sock_len) == 0)
-    && (local_sock.sin_family == AF_INET)
-    && (sock_len == sizeof(local_sock)))
-        // remember the port number
-        out_sock->port = ntohs(local_sock.sin_port);
-    else
-        ret = -1;
+    /* Always detect the local port, especially when the OS selected it. */
+    if((getsockname(eee->sock, (struct sockaddr *)&local_sock, &sock_len) != 0)
+       || (fill_n2nsock(&bound_sock, (struct sockaddr *)&local_sock) != 0))
+        return -1;
+    local_port = bound_sock.port;
 
-    // probe for local IP address
-    probe_sock = socket(PF_INET, SOCK_DGRAM, 0);
+    /* A connected probe reveals the source address selected for the supernode. */
+    probe_sock = socket(eee->sock_family, SOCK_DGRAM, 0);
     // connecting the UDP socket makes getsockname read the local address it uses to connect (to the sn in this case);
     // we cannot do it with the real (eee->sock) socket because socket does not accept any conenction from elsewhere then,
     // e.g. from another edge instead of the supernode; as re-connecting to AF_UNSPEC might not work to release the socket
     // on non-UNIXoids, we use a temporary socket
-    if((int)probe_sock >= 0) {
-        fill_sockaddr((struct sockaddr*)&sn_sock, sizeof(sn_sock), &eee->curr_sn->sock);
-        if(connect(probe_sock, (struct sockaddr *)&sn_sock, sizeof(sn_sock)) == 0) {
-            if((getsockname(probe_sock, (struct sockaddr *)&local_sock, &sock_len) == 0)
-            && (local_sock.sin_family == AF_INET)
-            && (sock_len == sizeof(local_sock))) {
-                memcpy(&(out_sock->addr.v4), &(local_sock.sin_addr.s_addr), IPV4_SIZE);
-            } else
-                ret = -4;
-        } else
-            ret = -3;
+    if((int)probe_sock < 0)
+        return -2;
+
+#ifdef IPV6_V6ONLY
+    if(eee->sock_family == AF_INET6) {
+        int v6only = 0;
+        setsockopt(probe_sock, IPPROTO_IPV6, IPV6_V6ONLY,
+                   (char *)&v6only, sizeof(v6only));
+    }
+#endif
+
+    sn_sock_len = fill_sockaddr_for_family((struct sockaddr *)&sn_sock,
+                                           sizeof(sn_sock), &eee->curr_sn->sock,
+                                           eee->sock_family);
+    if(!sn_sock_len
+       || (connect(probe_sock, (struct sockaddr *)&sn_sock, sn_sock_len) != 0)) {
         closesocket(probe_sock);
-    } else
-        ret = -2;
+        return -3;
+    }
 
-    out_sock->family = AF_INET;
+    sock_len = sizeof(local_sock);
+    if((getsockname(probe_sock, (struct sockaddr *)&local_sock, &sock_len) != 0)
+       || (fill_n2nsock(out_sock, (struct sockaddr *)&local_sock) != 0)) {
+        closesocket(probe_sock);
+        return -4;
+    }
 
-    return ret;
+    closesocket(probe_sock);
+    out_sock->port = local_port;
+    return 0;
+}
+
+
+static uint8_t edge_socket_family (const n2n_edge_t *eee) {
+
+    const struct peer_info *sn;
+
+    if((eee->conf.bind_sock.family == AF_INET)
+       || (eee->conf.bind_sock.family == AF_INET6))
+        return eee->conf.bind_sock.family;
+
+    /* Prefer a dual-stack IPv6 socket if any configured supernode needs it. */
+    for(sn = eee->conf.supernodes; sn; sn = (const struct peer_info *)sn->hh.next) {
+        if(sn->sock.family == AF_INET6)
+            return AF_INET6;
+    }
+
+    if(eee->curr_sn && (eee->curr_sn->sock.family == AF_INET6))
+        return AF_INET6;
+
+    return AF_INET;
 }
 
 
@@ -276,11 +310,20 @@ static int detect_local_ip_address (n2n_sock_t* out_sock, const n2n_edge_t* eee)
 int supernode_connect (n2n_edge_t *eee) {
 
     int sockopt;
-    struct sockaddr_in sn_sock;
+    struct sockaddr_storage sn_sock;
+    socklen_t sn_sock_len;
+    n2n_sock_t bind_sock;
     n2n_sock_t local_sock;
     n2n_sock_str_t sockbuf;
+    uint8_t required_family = edge_socket_family(eee);
 
     if((eee->conf.connect_tcp) && (eee->sock >= 0)) {
+        closesocket(eee->sock);
+        eee->sock = -1;
+    }
+
+    if((eee->sock >= 0) && (eee->sock_family == AF_INET)
+       && (required_family == AF_INET6)) {
         closesocket(eee->sock);
         eee->sock = -1;
     }
@@ -291,17 +334,31 @@ int supernode_connect (n2n_edge_t *eee) {
             traceEvent(TRACE_NORMAL, "binding to local port %d",
                                      (eee->conf.connect_tcp) ? 0 : eee->conf.local_port);
 
-        eee->sock = open_socket((eee->conf.connect_tcp) ?  0 : eee->conf.local_port,
-                                 eee->conf.bind_address,
-                                 eee->conf.connect_tcp);
+        bind_sock = eee->conf.bind_sock;
+        if((bind_sock.family != AF_INET) && (bind_sock.family != AF_INET6)) {
+            memset(&bind_sock, 0, sizeof(bind_sock));
+            bind_sock.family = required_family;
+        }
+        bind_sock.port = (eee->conf.connect_tcp) ? 0 : eee->conf.local_port;
+
+        eee->sock = open_socket_bind(&bind_sock, eee->conf.connect_tcp);
 
         if(eee->sock < 0) {
             traceEvent(TRACE_ERROR, "failed to bind main UDP port %u",
                                      (eee->conf.connect_tcp) ? 0 : eee->conf.local_port);
             return -1;
         }
+        eee->sock_family = bind_sock.family;
 
-        fill_sockaddr((struct sockaddr*)&sn_sock, sizeof(sn_sock), &eee->curr_sn->sock);
+        sn_sock_len = fill_sockaddr_for_family((struct sockaddr *)&sn_sock,
+                                               sizeof(sn_sock), &eee->curr_sn->sock,
+                                               eee->sock_family);
+        if(!sn_sock_len) {
+            traceEvent(TRACE_ERROR, "main socket address family cannot reach supernode %s",
+                       sock_to_cstr(sockbuf, &eee->curr_sn->sock));
+            supernode_disconnect(eee);
+            return -1;
+        }
 
         // set tcp socket to O_NONBLOCK so connect does not hang
         // requires checking the socket for readiness before sending and receving
@@ -312,30 +369,66 @@ int supernode_connect (n2n_edge_t *eee) {
 #else
             fcntl(eee->sock, F_SETFL, O_NONBLOCK);
 #endif
-            if((connect(eee->sock, (struct sockaddr*)&(sn_sock), sizeof(struct sockaddr)) < 0)
+            if((connect(eee->sock, (struct sockaddr*)&sn_sock, sn_sock_len) < 0)
                && (errno != EINPROGRESS)) {
+                closesocket(eee->sock);
                 eee->sock = -1;
                 return -1;
             }
         }
 
         if(eee->conf.tos) {
+            int tos_result;
+
             /* https://www.tucny.com/Home/dscp-tos */
             sockopt = eee->conf.tos;
 
-            if(setsockopt(eee->sock, IPPROTO_IP, IP_TOS, (char *)&sockopt, sizeof(sockopt)) == 0)
+            if(eee->sock_family == AF_INET6) {
+#ifdef IPV6_TCLASS
+                tos_result = setsockopt(eee->sock, IPPROTO_IPV6, IPV6_TCLASS,
+                                        (char *)&sockopt, sizeof(sockopt));
+#else
+                errno = EAFNOSUPPORT;
+                tos_result = -1;
+#endif
+            } else
+                tos_result = setsockopt(eee->sock, IPPROTO_IP, IP_TOS,
+                                        (char *)&sockopt, sizeof(sockopt));
+
+            if(tos_result == 0)
                 traceEvent(TRACE_INFO, "TOS set to 0x%x", eee->conf.tos);
             else
                 traceEvent(TRACE_WARNING, "could not set TOS 0x%x[%d]: %s", eee->conf.tos, errno, strerror(errno));
         }
 #ifdef IP_PMTUDISC_DO
-        sockopt = (eee->conf.disable_pmtu_discovery) ? IP_PMTUDISC_DONT : IP_PMTUDISC_DO;
+        int pmtu_ok = 1;
 
-        if(setsockopt(eee->sock, IPPROTO_IP, IP_MTU_DISCOVER, &sockopt, sizeof(sockopt)) < 0)
-            traceEvent(TRACE_WARNING, "could not %s PMTU discovery[%d]: %s",
-                       (eee->conf.disable_pmtu_discovery) ? "disable" : "enable", errno, strerror(errno));
-        else
-            traceEvent(TRACE_INFO, "PMTU discovery %s", (eee->conf.disable_pmtu_discovery) ? "disabled" : "enabled");
+        if(eee->sock_family == AF_INET6) {
+#if defined(IPV6_MTU_DISCOVER) && defined(IPV6_PMTUDISC_DO) && defined(IPV6_PMTUDISC_DONT)
+            sockopt = (eee->conf.disable_pmtu_discovery) ? IPV6_PMTUDISC_DONT : IPV6_PMTUDISC_DO;
+            if(setsockopt(eee->sock, IPPROTO_IPV6, IPV6_MTU_DISCOVER,
+                          &sockopt, sizeof(sockopt)) < 0) {
+                traceEvent(TRACE_WARNING, "could not %s IPv6 PMTU discovery[%d]: %s",
+                           (eee->conf.disable_pmtu_discovery) ? "disable" : "enable",
+                           errno, strerror(errno));
+                pmtu_ok = 0;
+            }
+#else
+            pmtu_ok = 0;
+#endif
+        } else {
+            sockopt = (eee->conf.disable_pmtu_discovery) ? IP_PMTUDISC_DONT : IP_PMTUDISC_DO;
+            if(setsockopt(eee->sock, IPPROTO_IP, IP_MTU_DISCOVER,
+                          &sockopt, sizeof(sockopt)) < 0) {
+                traceEvent(TRACE_WARNING, "could not %s PMTU discovery[%d]: %s",
+                           (eee->conf.disable_pmtu_discovery) ? "disable" : "enable",
+                           errno, strerror(errno));
+                pmtu_ok = 0;
+            }
+        }
+        if(pmtu_ok)
+            traceEvent(TRACE_INFO, "PMTU discovery %s",
+                       (eee->conf.disable_pmtu_discovery) ? "disabled" : "enabled");
 #endif
 
         memset(&local_sock, 0, sizeof(n2n_sock_t));
@@ -636,7 +729,7 @@ static struct peer_info* find_peer_by_sock (const n2n_sock_t *sock, struct peer_
     struct peer_info *scan, *tmp, *ret = NULL;
 
     HASH_ITER(hh, peer_list, scan, tmp) {
-        if(memcmp(&(scan->sock), sock, sizeof(n2n_sock_t)) == 0) {
+        if(sock_equal(&(scan->sock), sock)) {
             ret = scan;
             break;
         }
@@ -714,15 +807,18 @@ static void register_with_new_peer (n2n_edge_t *eee,
                 socklen_t lenTTL = sizeof(int);
                 n2n_sock_t sock = scan->sock;
                 int alter = 16; /* TODO: set by command line or more reliable prediction method */
+                int ttl_level = (eee->sock_family == AF_INET6) ? IPPROTO_IPV6 : IPPROTO_IP;
+                int ttl_option = (eee->sock_family == AF_INET6) ? IPV6_UNICAST_HOPS : IP_TTL;
 
-                getsockopt(eee->sock, IPPROTO_IP, IP_TTL, (void *) (char *) &curTTL, &lenTTL);
-                setsockopt(eee->sock, IPPROTO_IP, IP_TTL,
+                getsockopt(eee->sock, ttl_level, ttl_option, (void *) (char *) &curTTL, &lenTTL);
+                setsockopt(eee->sock, ttl_level, ttl_option,
                            (void *) (char *) &eee->conf.register_ttl,
                            sizeof(eee->conf.register_ttl));
                 for(; alter > 0; alter--, sock.port++) {
                     send_register(eee, &sock, mac, N2N_PORT_REG_COOKIE);
                 }
-                setsockopt(eee->sock, IPPROTO_IP, IP_TTL, (void *) (char *) &curTTL, sizeof(curTTL));
+                setsockopt(eee->sock, ttl_level, ttl_option,
+                           (void *) (char *) &curTTL, sizeof(curTTL));
 #endif
             } else { /* eee->conf.register_ttl <= 0 */
                 /* Normal STUN */
@@ -1049,7 +1145,8 @@ static int check_sock_ready (n2n_edge_t *eee) {
 
 /** Send a datagram to a socket file descriptor */
 static ssize_t sendto_fd (n2n_edge_t *eee, const void *buf,
-                          size_t len, struct sockaddr_in *dest,
+                          size_t len, const struct sockaddr *dest,
+                          socklen_t dest_len,
                           const n2n_sock_t * n2ndest) {
 
     ssize_t sent = 0;
@@ -1059,7 +1156,7 @@ static ssize_t sendto_fd (n2n_edge_t *eee, const void *buf,
     }
 
     sent = sendto(eee->sock, buf, len, 0 /*flags*/,
-                  (struct sockaddr *)dest, sizeof(struct sockaddr_in));
+                  dest, dest_len);
 
     if(sent != -1) {
         // sendto success
@@ -1116,7 +1213,8 @@ err_out:
 static void sendto_sock (n2n_edge_t *eee, const void * buf,
                             size_t len, const n2n_sock_t * dest) {
 
-    struct sockaddr_in peer_addr;
+    struct sockaddr_storage peer_addr;
+    socklen_t peer_addr_len;
     ssize_t sent;
     int value = 0;
 
@@ -1134,8 +1232,15 @@ static void sendto_sock (n2n_edge_t *eee, const void * buf,
         // invalid socket file descriptor, e.g. TCP unconnected has fd of '-1'
         return;
 
-    // network order socket
-    fill_sockaddr((struct sockaddr *) &peer_addr, sizeof(peer_addr), dest);
+    // network order socket, mapped when the main socket is IPv6 dual-stack
+    peer_addr_len = fill_sockaddr_for_family((struct sockaddr *)&peer_addr,
+                                             sizeof(peer_addr), dest,
+                                             eee->sock_family);
+    if(!peer_addr_len) {
+        traceEvent(TRACE_WARNING, "cannot send to address family %u from socket family %u",
+                   dest->family, eee->sock_family);
+        return;
+    }
 
     // if the connection is tcp, i.e. not the regular sock...
     if(eee->conf.connect_tcp) {
@@ -1148,13 +1253,15 @@ static void sendto_sock (n2n_edge_t *eee, const void * buf,
 
         // prepend packet length...
         uint16_t pktsize16 = htobe16(len);
-        sent = sendto_fd(eee, (uint8_t*)&pktsize16, sizeof(pktsize16), &peer_addr, dest);
+        sent = sendto_fd(eee, (uint8_t*)&pktsize16, sizeof(pktsize16),
+                         (struct sockaddr *)&peer_addr, peer_addr_len, dest);
 
         if(sent <= 0)
             return;
         // ...before sending the actual data
     }
-    sent = sendto_fd(eee, buf, len, &peer_addr, dest);
+    sent = sendto_fd(eee, buf, len, (struct sockaddr *)&peer_addr,
+                     peer_addr_len, dest);
 
     // if the connection is tcp, i.e. not the regular sock...
     if(eee->conf.connect_tcp) {
@@ -1934,7 +2041,7 @@ static int find_peer_destination (n2n_edge_t * eee,
 
     if(is_multi_broadcast(mac_address)) {
         traceEvent(TRACE_DEBUG, "multicast or broadcast destination peer, using supernode");
-        memcpy(destination, &(eee->curr_sn->sock), sizeof(struct sockaddr_in));
+        memcpy(destination, &(eee->curr_sn->sock), sizeof(*destination));
         return(0);
     }
 
@@ -1960,7 +2067,7 @@ static int find_peer_destination (n2n_edge_t * eee,
     }
 
     if(retval == 0) {
-        memcpy(destination, &(eee->curr_sn->sock), sizeof(struct sockaddr_in));
+        memcpy(destination, &(eee->curr_sn->sock), sizeof(*destination));
         traceEvent(TRACE_DEBUG, "p2p peer %s not found, using supernode",
                                 macaddr_str(mac_buf, mac_address));
 
@@ -2250,14 +2357,11 @@ void process_udp (n2n_edge_t *eee, const struct sockaddr *sender_sock, const SOC
     uint64_t              stamp = 0;
     int                   skip_add = 0;
 
-    /* REVISIT: when UDP/IPv6 is supported we will need a flag to indicate which
-     * IP transport version the packet arrived on. May need to UDP sockets. */
-
     memset(&sender, 0, sizeof(n2n_sock_t));
 
     if(eee->conf.connect_tcp)
         // TCP expects that we know our comm partner and does not deliver the sender
-        memcpy(&sender, &(eee->curr_sn->sock), sizeof(struct sockaddr_in));
+        memcpy(&sender, &(eee->curr_sn->sock), sizeof(sender));
     else {
         // REVISIT: type conversion back and forth, choose a consistent approach throughout whole code,
         //          i.e. stick with more general sockaddr as long as possible and narrow only if required
@@ -2559,7 +2663,12 @@ void process_udp (n2n_edge_t *eee, const struct sockaddr *sender_sock, const SOC
                             inet_ntop(payload_sock.family,
                                       (payload_sock.family == AF_INET) ? (void*)&(payload_sock.addr.v4) : (void*)&(payload_sock.addr.v6),
                                       sn->ip_addr, N2N_EDGE_SN_HOST_SIZE - 1);
-                            sprintf(ip_tmp, "%s:%u", (char*)sn->ip_addr, (uint16_t)(payload_sock.port));
+                            if(payload_sock.family == AF_INET6)
+                                snprintf(ip_tmp, sizeof(ip_tmp), "[%s]:%u",
+                                         (char *)sn->ip_addr, (uint16_t)payload_sock.port);
+                            else
+                                snprintf(ip_tmp, sizeof(ip_tmp), "%s:%u",
+                                         (char *)sn->ip_addr, (uint16_t)payload_sock.port);
                             memcpy(sn->ip_addr, ip_tmp, sizeof(ip_tmp));
                         }
                         sn_selection_criterion_default(&(sn->selection_criterion));
@@ -3170,6 +3279,7 @@ void edge_init_conf_defaults (n2n_edge_conf_t *conf) {
     memset(conf, 0, sizeof(*conf));
 
     conf->bind_address = INADDR_ANY; /* any address */
+    conf->bind_sock.family = AF_UNSPEC;
     conf->local_port = 0 /* any port */;
     conf->preferred_sock.family = AF_INVALID;
     conf->mgmt_port = N2N_EDGE_MGMT_PORT; /* 5644 by default */

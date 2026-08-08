@@ -26,7 +26,8 @@ Community name is 16 bytes in length. A name smaller than this is padded with
 .TP
 \fB\-l \fR<\fIhost:port\fR>, \fB\-\-supernode-list\fR=<\fIhost:port\fR>
 sets the n2n supernode IP address and port to register to. Multiple supernodes
-can be specified.
+can be specified. IPv6 literals must use bracket notation, for example
+B-l [2001:db8::1]:7654R.
 .TP
 \fB\-p \fR[<\fIlocal_ip_address\fR>:]<\fIlocal_port\fR>
 binds edge to the given UDP port. Useful for keeping the same external socket
@@ -36,6 +37,9 @@ port forwarding feature can refer to that fixed port.
 Optionally, the edge can bind to the provided local ip address only. This is
 useful in case restriction to a certain LAN or WiFi interface is desired.
 By default, the edge binds to any interface.
+For an IPv6 bind address use bracket notation, for example
+B-p [2001:db8::2]:50000R. An edge using an IPv6 supernode opens a
+dual-stack socket so that IPv4 peer endpoints remain usable.
 .TP
 \fB\-T \fR<\fItos\fR>
 TOS for packets, e.g. 0x48 for SSH like priority

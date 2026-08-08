@@ -103,6 +103,19 @@ static int process_udp (n2n_sn_t *sss,
                         time_t now);
 
 
+static char *sockaddr_to_cstr (n2n_sock_str_t out, const struct sockaddr *sockaddr) {
+
+    n2n_sock_t sock;
+
+    if(fill_n2nsock(&sock, sockaddr) != 0) {
+        snprintf(out, N2N_SOCKBUF_SIZE, "(invalid socket)");
+        return out;
+    }
+
+    return sock_to_cstr(out, &sock);
+}
+
+
 /* ************************************** */
 
 
@@ -499,6 +512,7 @@ int load_allowed_sn_community (n2n_sn_t *sss) {
 static ssize_t sendto_fd (n2n_sn_t *sss,
                           SOCKET socket_fd,
                           const struct sockaddr *socket,
+                          socklen_t socket_len,
                           const uint8_t *pktbuf,
                           size_t pktsize) {
 
@@ -506,7 +520,7 @@ static ssize_t sendto_fd (n2n_sn_t *sss,
     n2n_tcp_connection_t *conn;
 
     sent = sendto(socket_fd, (void *)pktbuf, pktsize, 0 /* flags */,
-                  socket, sizeof(struct sockaddr_in));
+                  socket, socket_len);
 
     if((sent <= 0) && (errno)) {
         char * c = strerror(errno);
@@ -541,6 +555,23 @@ static ssize_t sendto_sock(n2n_sn_t *sss,
 
     ssize_t sent = 0;
     int value = 0;
+    n2n_sock_t n2n_destination;
+    struct sockaddr_storage destination;
+    socklen_t destination_len;
+
+    if(fill_n2nsock(&n2n_destination, socket) != 0) {
+        errno = EAFNOSUPPORT;
+        return -1;
+    }
+
+    destination_len = fill_sockaddr_for_family((struct sockaddr *)&destination,
+                                                sizeof(destination),
+                                                &n2n_destination,
+                                                sss->sock_family);
+    if(!destination_len) {
+        errno = EAFNOSUPPORT;
+        return -1;
+    }
 
     // if the connection is tcp, i.e. not the regular sock...
     if((socket_fd >= 0) && (socket_fd != sss->sock)) {
@@ -553,14 +584,16 @@ static ssize_t sendto_sock(n2n_sn_t *sss,
 
         // prepend packet length...
         uint16_t pktsize16 = htobe16(pktsize);
-        sent = sendto_fd(sss, socket_fd, socket, (uint8_t*)&pktsize16, sizeof(pktsize16));
+        sent = sendto_fd(sss, socket_fd, (struct sockaddr *)&destination,
+                         destination_len, (uint8_t*)&pktsize16, sizeof(pktsize16));
 
         if(sent <= 0)
             return -1;
         // ...before sending the actual data
     }
 
-    sent = sendto_fd(sss, socket_fd, socket, pktbuf, pktsize);
+    sent = sendto_fd(sss, socket_fd, (struct sockaddr *)&destination,
+                     destination_len, pktbuf, pktsize);
 
     // if the connection is tcp, i.e. not the regular sock...
     if((socket_fd >= 0) && (socket_fd != sss->sock)) {
@@ -588,24 +621,20 @@ static ssize_t sendto_peer (n2n_sn_t *sss,
 
     n2n_sock_str_t sockbuf;
 
-    if(AF_INET == peer->sock.family) {
+    struct sockaddr_storage socket;
 
-        // network order socket
-        struct sockaddr_in socket;
-        fill_sockaddr((struct sockaddr *)&socket, sizeof(socket), &(peer->sock));
-
-        traceEvent(TRACE_DEBUG, "sent %lu bytes to [%s]",
-                   pktsize,
-                   sock_to_cstr(sockbuf, &(peer->sock)));
-
-        return sendto_sock(sss,
-                           (peer->socket_fd >= 0) ? peer->socket_fd : sss->sock,
-                           (const struct sockaddr*)&socket, pktbuf, pktsize);
-    } else {
-        /* AF_INET6 not implemented */
+    if(fill_sockaddr((struct sockaddr *)&socket, sizeof(socket), &(peer->sock)) != 0) {
         errno = EAFNOSUPPORT;
         return -1;
     }
+
+    traceEvent(TRACE_DEBUG, "sent %lu bytes to [%s]",
+               pktsize,
+               sock_to_cstr(sockbuf, &(peer->sock)));
+
+    return sendto_sock(sss,
+                       (peer->socket_fd >= 0) ? peer->socket_fd : sss->sock,
+                       (const struct sockaddr*)&socket, pktbuf, pktsize);
 }
 
 
@@ -780,6 +809,9 @@ int sn_init_defaults (n2n_sn_t *sss) {
     sss->daemon = 1; /* By defult run as a daemon. */
     sss->bind_address = INADDR_ANY; /* any address */
     sss->lport = N2N_SN_LPORT_DEFAULT;
+    sss->bind_sock.family = AF_INET;
+    sss->bind_sock.port = N2N_SN_LPORT_DEFAULT;
+    sss->sock_family = AF_INET;
     sss->mport = N2N_SN_MGMT_PORT;
     sss->sock = -1;
     sss->mgmt_sock = -1;
@@ -2022,7 +2054,7 @@ static int process_udp (n2n_sn_t * sss,
                 }
                 if(peer->sock.family == (uint8_t)AF_INVALID)
                     continue; /* do not add unresolved supernodes to payload */
-                if(memcmp(&(peer->sock), &(ack.sock), sizeof(n2n_sock_t)) == 0) continue; /* a supernode doesn't add itself to the payload */
+                if(sock_equal(&(peer->sock), &(ack.sock))) continue; /* a supernode doesn't add itself to the payload */
                 if((now - peer->last_seen) >= LAST_SEEN_SN_NEW) continue;  /* skip long-time-not-seen supernodes.
                                                                             * We need to allow for a little extra time because supernodes sometimes exceed
                                                                             * their SN_ACTIVE time before they get re-registred to. */
@@ -2689,7 +2721,8 @@ int run_sn_loop (n2n_sn_t *sss) {
                                      sender_sock, &ss_size);
 
                     if(bread <= 0) {
-                        traceEvent(TRACE_INFO, "closing tcp connection to [%s]", sock_to_cstr(sockbuf, (n2n_sock_t*)sender_sock));
+                        traceEvent(TRACE_INFO, "closing tcp connection to [%s]",
+                                   sockaddr_to_cstr(sockbuf, &(conn->sock)));
                         traceEvent(TRACE_DEBUG, "recvfrom() returns %d and sees errno %d (%s)", bread, errno, strerror(errno));
 #ifdef _WIN32
                         traceEvent(TRACE_DEBUG, "WSAGetLastError(): %u", WSAGetLastError());
@@ -2704,7 +2737,8 @@ int run_sn_loop (n2n_sn_t *sss) {
                             // the prepended length has been read, preparing for the packet
                             conn->expected += be16toh(*(uint16_t*)(conn->buffer));
                             if(conn->expected > N2N_SN_PKTBUF_SIZE) {
-                                traceEvent(TRACE_INFO, "closing tcp connection to [%s]", sock_to_cstr(sockbuf, (n2n_sock_t*)sender_sock));
+                                traceEvent(TRACE_INFO, "closing tcp connection to [%s]",
+                                           sockaddr_to_cstr(sockbuf, &(conn->sock)));
                                 traceEvent(TRACE_DEBUG, "too many bytes in tcp packet expected");
                                 close_tcp_connection(sss, conn);
                                 continue;
@@ -2750,13 +2784,13 @@ int run_sn_loop (n2n_sn_t *sss) {
                             conn->position = 0;
                             HASH_ADD_INT(sss->tcp_connections, socket_fd, conn);
                             traceEvent(TRACE_INFO, "accepted incoming TCP connection from [%s]",
-                                                   sock_to_cstr(sockbuf, (n2n_sock_t*)sender_sock));
+                                       sockaddr_to_cstr(sockbuf, sender_sock));
                         }
                     }
                 } else {
                         // no space to store the socket for a new connection, close immediately
                         traceEvent(TRACE_DEBUG, "denied incoming TCP connection from [%s] due to max connections limit hit",
-                                                sock_to_cstr(sockbuf, (n2n_sock_t*)sender_sock));
+                                   sockaddr_to_cstr(sockbuf, sender_sock));
                 }
             }
 #endif /* N2N_HAVE_TCP */

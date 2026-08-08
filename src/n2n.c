@@ -26,6 +26,7 @@
 #include <time.h>            // for time, localtime, strftime
 #include "config.h"          // for PACKAGE_BUILDDATE, PACKA...
 #include "n2n.h"
+#include "n2n_wire.h"
 #include "random_numbers.h"  // for n2n_rand
 #include "sn_selection.h"    // for sn_selection_criterion_default
 #include "uthash.h"          // for UT_hash_handle, HASH_DEL, HASH_ITER, HAS...
@@ -47,15 +48,33 @@
 
 /* ************************************** */
 
-SOCKET open_socket (int local_port, in_addr_t address, int type /* 0 = UDP, TCP otherwise */) {
+SOCKET open_socket_bind (const n2n_sock_t *local_address,
+                         int type /* 0 = UDP, TCP otherwise */) {
 
     SOCKET sock_fd;
-    struct sockaddr_in local_address;
+    struct sockaddr_storage local_sockaddr;
+    socklen_t local_sockaddr_len;
     int sockopt;
 
-    if((int)(sock_fd = socket(PF_INET, ((type == 0) ? SOCK_DGRAM : SOCK_STREAM) , 0)) < 0) {
-        traceEvent(TRACE_ERROR, "Unable to create socket [%s][%d]\n",
-                   strerror(errno), sock_fd);
+    if(!local_address
+       || ((local_address->family != AF_INET) && (local_address->family != AF_INET6))) {
+        errno = EAFNOSUPPORT;
+        return -1;
+    }
+
+    local_sockaddr_len = fill_sockaddr_for_family((struct sockaddr *)&local_sockaddr,
+                                                   sizeof(local_sockaddr),
+                                                   local_address,
+                                                   local_address->family);
+    if(!local_sockaddr_len) {
+        errno = EAFNOSUPPORT;
+        return -1;
+    }
+
+    if((int)(sock_fd = socket(local_address->family,
+                              ((type == 0) ? SOCK_DGRAM : SOCK_STREAM), 0)) < 0) {
+        traceEvent(TRACE_ERROR, "Unable to create socket for address family %u [%s][%d]\n",
+                   local_address->family, strerror(errno), sock_fd);
         return(-1);
     }
 
@@ -66,17 +85,42 @@ SOCKET open_socket (int local_port, in_addr_t address, int type /* 0 = UDP, TCP 
     sockopt = 1;
     setsockopt(sock_fd, SOL_SOCKET, SO_REUSEADDR, (char *)&sockopt, sizeof(sockopt));
 
-    memset(&local_address, 0, sizeof(local_address));
-    local_address.sin_family = AF_INET;
-    local_address.sin_port = htons(local_port);
-    local_address.sin_addr.s_addr = htonl(address);
+#ifdef IPV6_V6ONLY
+    if(local_address->family == AF_INET6) {
+        /* One IPv6 socket can also carry IPv4 peers as mapped addresses. */
+        sockopt = 0;
+        if(setsockopt(sock_fd, IPPROTO_IPV6, IPV6_V6ONLY,
+                      (char *)&sockopt, sizeof(sockopt)) != 0) {
+            traceEvent(TRACE_WARNING, "Unable to enable IPv4 traffic on IPv6 socket [%s]\n",
+                       strerror(errno));
+        }
+    }
+#endif
 
-    if(bind(sock_fd,(struct sockaddr*) &local_address, sizeof(local_address)) == -1) {
-        traceEvent(TRACE_ERROR, "Bind error on local port %u [%s]\n", local_port, strerror(errno));
+    if(bind(sock_fd, (struct sockaddr *)&local_sockaddr, local_sockaddr_len) == -1) {
+        traceEvent(TRACE_ERROR, "Bind error on local port %u [%s]\n",
+                   local_address->port, strerror(errno));
+        closesocket(sock_fd);
         return(-1);
     }
 
     return(sock_fd);
+}
+
+
+SOCKET open_socket (int local_port, in_addr_t address,
+                    int type /* 0 = UDP, TCP otherwise */) {
+
+    n2n_sock_t local_address;
+    uint32_t address_network_order;
+
+    memset(&local_address, 0, sizeof(local_address));
+    local_address.family = AF_INET;
+    local_address.port = local_port;
+    address_network_order = htonl(address);
+    memcpy(local_address.addr.v4, &address_network_order, IPV4_SIZE);
+
+    return open_socket_bind(&local_address, type);
 }
 
 
@@ -279,62 +323,206 @@ char * macaddr_str (macstr_t buf,
 
 /* *********************************************** */
 
-/** Resolve the supernode IP address.
- *
- */
-int supernode2sock (n2n_sock_t *sn, const n2n_sn_name_t addrIn) {
+static int parse_port_number (const char *text, uint16_t *port) {
 
-    n2n_sn_name_t addr;
-    char *supernode_host;
-    char *supernode_port;
-    int rv = 0;
-    int nameerr;
-    const struct addrinfo aihints = {0, PF_INET, 0, 0, 0, NULL, NULL, NULL};
-    struct addrinfo * ainfo = NULL;
-    struct sockaddr_in * saddr;
+    char *end = NULL;
+    long value;
 
-    sn->family = AF_INVALID;
+    if(!text || !text[0])
+        return -1;
 
-    memcpy(addr, addrIn, N2N_EDGE_SN_HOST_SIZE);
-    supernode_host = strtok(addr, ":");
+    errno = 0;
+    value = strtol(text, &end, 10);
+    if(errno || !end || end[0] || (value < 1) || (value > 65535))
+        return -1;
 
-    if(supernode_host) {
-        supernode_port = strtok(NULL, ":");
-        if(supernode_port) {
-            sn->port = atoi(supernode_port);
-            nameerr = getaddrinfo(supernode_host, NULL, &aihints, &ainfo);
-            if(0 == nameerr) {
-               /* ainfo s the head of a linked list if non-NULL. */
-                if(ainfo && (PF_INET == ainfo->ai_family)) {
-                    /* It is definitely and IPv4 address -> sockaddr_in */
-                    saddr = (struct sockaddr_in *)ainfo->ai_addr;
-                    memcpy(sn->addr.v4, &(saddr->sin_addr.s_addr), IPV4_SIZE);
-                    sn->family = AF_INET;
-                    traceEvent(TRACE_INFO, "supernode2sock successfully resolves supernode IPv4 address for %s", supernode_host);
-                    rv = 0;
-                } else {
-                    /* Should only return IPv4 addresses due to aihints. */
-                    traceEvent(TRACE_WARNING, "supernode2sock fails to resolve supernode IPv4 address for %s", supernode_host);
-                    rv = -1;
-                }
-                freeaddrinfo(ainfo); /* free everything allocated by getaddrinfo(). */
-            } else {
-                traceEvent(TRACE_WARNING, "supernode2sock fails to resolve supernode host %s, %d: %s", supernode_host, nameerr, gai_strerror(nameerr));
-                rv = -2;
-            }
-        } else {
-            traceEvent(TRACE_WARNING, "supernode2sock sees malformed supernode parameter (-l <host:port>) %s", addrIn);
-            rv = -3;
-        }
+    *port = (uint16_t)value;
+    return 0;
+}
+
+
+static int split_supernode_address (const char *spec,
+                                    char *host, size_t host_size,
+                                    char *port, size_t port_size) {
+
+    const char *host_start = spec;
+    const char *host_end;
+    const char *port_start;
+    const char *first_colon;
+    const char *last_colon;
+    size_t host_len;
+
+    if(!spec || !spec[0])
+        return -1;
+
+    if(spec[0] == '[') {
+        host_start = spec + 1;
+        host_end = strchr(host_start, ']');
+        if(!host_end || (host_end == host_start) || (host_end[1] != ':'))
+            return -1;
+        port_start = host_end + 2;
     } else {
-        traceEvent(TRACE_WARNING, "supernode2sock sees malformed supernode parameter (-l <host:port>) %s",
-                   addrIn);
-        rv = -4;
+        first_colon = strchr(spec, ':');
+        last_colon = strrchr(spec, ':');
+        /* IPv6 literals with a port must use [address]:port. */
+        if(!last_colon || (first_colon != last_colon) || (last_colon == spec))
+            return -1;
+        host_end = last_colon;
+        port_start = last_colon + 1;
     }
 
-    ainfo = NULL;
+    host_len = (size_t)(host_end - host_start);
+    if((host_len >= host_size) || (strlen(port_start) >= port_size))
+        return -1;
 
-    return rv;
+    memcpy(host, host_start, host_len);
+    host[host_len] = '\0';
+    strcpy(port, port_start);
+    return 0;
+}
+
+
+int parse_bind_address (n2n_sock_t *sock, const char *spec,
+                        uint16_t default_port, uint8_t default_family) {
+
+    char work[N2N_EDGE_SN_HOST_SIZE];
+    char *host = work;
+    char *port_text = NULL;
+    char *closing_bracket;
+    char *first_colon;
+    char *last_colon;
+    struct addrinfo hints;
+    struct addrinfo *addresses = NULL;
+    struct addrinfo *entry;
+    uint16_t port = default_port;
+    size_t len;
+
+    if(!sock || !spec)
+        return -1;
+
+    len = strlen(spec);
+    if(!len || (len >= sizeof(work)))
+        return -1;
+
+    memset(sock, 0, sizeof(*sock));
+    memcpy(work, spec, len + 1);
+
+    if(work[0] == '[') {
+        host = work + 1;
+        closing_bracket = strchr(host, ']');
+        if(!closing_bracket)
+            return -1;
+        if(closing_bracket[1]) {
+            if(closing_bracket[1] != ':')
+                return -1;
+            port_text = closing_bracket + 2;
+        }
+        *closing_bracket = '\0';
+    } else {
+        first_colon = strchr(work, ':');
+        last_colon = strrchr(work, ':');
+        if(first_colon && (first_colon == last_colon)) {
+            *last_colon = '\0';
+            port_text = last_colon + 1;
+        } else if(strspn(work, "0123456789") == strlen(work)) {
+            port_text = work;
+            host = work + strlen(work);
+        }
+    }
+
+    if(port_text && (parse_port_number(port_text, &port) != 0))
+        return -1;
+
+    sock->port = port;
+    if(!host[0]) {
+        sock->family = default_family;
+        return ((default_family == AF_UNSPEC) || (default_family == AF_INET)
+                || (default_family == AF_INET6)) ? 0 : -1;
+    }
+
+    memset(&hints, 0, sizeof(hints));
+    hints.ai_family = AF_UNSPEC;
+    hints.ai_socktype = SOCK_DGRAM;
+    hints.ai_flags = AI_NUMERICHOST;
+    if(getaddrinfo(host, NULL, &hints, &addresses) != 0)
+        return -1;
+
+    for(entry = addresses; entry; entry = entry->ai_next) {
+        if(((entry->ai_family == AF_INET) || (entry->ai_family == AF_INET6))
+           && (fill_n2nsock(sock, entry->ai_addr) == 0)) {
+            sock->port = port;
+            freeaddrinfo(addresses);
+            return 0;
+        }
+    }
+
+    freeaddrinfo(addresses);
+    return -1;
+}
+
+
+/** Resolve an IPv4 or IPv6 supernode address. IPv6 literals use [addr]:port. */
+int supernode2sock (n2n_sock_t *sn, const char *addrIn) {
+
+    char supernode_host[N2N_EDGE_SN_HOST_SIZE];
+    char supernode_port[6];
+    uint16_t port;
+    int nameerr;
+    struct addrinfo aihints;
+    struct addrinfo *ainfo = NULL;
+    struct addrinfo *entry;
+    static const int preferred_families[] = {AF_INET, AF_INET6};
+    size_t family_index;
+
+    if(!sn)
+        return -4;
+
+    memset(sn, 0, sizeof(*sn));
+    sn->family = AF_INVALID;
+
+    if(!addrIn || (strlen(addrIn) >= N2N_EDGE_SN_HOST_SIZE)) {
+        traceEvent(TRACE_WARNING, "supernode address is empty or too long");
+        return -3;
+    }
+
+    if(split_supernode_address(addrIn, supernode_host, sizeof(supernode_host),
+                               supernode_port, sizeof(supernode_port)) != 0
+       || (parse_port_number(supernode_port, &port) != 0)) {
+        traceEvent(TRACE_WARNING,
+                   "supernode2sock sees malformed supernode parameter (-l <host:port>) %s",
+                   addrIn ? addrIn : "(null)");
+        return -3;
+    }
+
+    memset(&aihints, 0, sizeof(aihints));
+    aihints.ai_family = AF_UNSPEC;
+    aihints.ai_socktype = SOCK_DGRAM;
+    nameerr = getaddrinfo(supernode_host, supernode_port, &aihints, &ainfo);
+    if(nameerr != 0) {
+        traceEvent(TRACE_WARNING, "supernode2sock fails to resolve supernode host %s, %d: %s",
+                   supernode_host, nameerr, gai_strerror(nameerr));
+        return -2;
+    }
+
+    /* Keep IPv4 preference for dual-address DNS names, then fall back to IPv6. */
+    for(family_index = 0;
+        family_index < sizeof(preferred_families) / sizeof(preferred_families[0]);
+        ++family_index) {
+        for(entry = ainfo; entry; entry = entry->ai_next) {
+            if((entry->ai_family == preferred_families[family_index])
+               && (fill_n2nsock(sn, entry->ai_addr) == 0)) {
+                traceEvent(TRACE_INFO, "supernode2sock resolved IPv%s address for %s",
+                           (sn->family == AF_INET6) ? "6" : "4", supernode_host);
+                freeaddrinfo(ainfo);
+                return 0;
+            }
+        }
+    }
+
+    freeaddrinfo(ainfo);
+    sn->family = AF_INVALID;
+    traceEvent(TRACE_WARNING, "supernode2sock found no usable address for %s", supernode_host);
+    return -1;
 }
 
 
@@ -511,7 +699,7 @@ struct peer_info* add_sn_to_list_by_mac_or_sock (struct peer_info **sn_list, n2n
 
     if(peer == NULL) { /* zero MAC, search by socket */
         HASH_ITER(hh, *sn_list, scan, tmp) {
-            if(memcmp(&(scan->sock), sock, sizeof(n2n_sock_t)) == 0) {
+            if(sock_equal(&(scan->sock), sock)) {
                 // update mac if appropriate, needs to be deleted first because it is key to the hash list
                 if(!is_null_mac(mac)) {
                     HASH_DEL(*sn_list, scan);
@@ -745,7 +933,7 @@ extern char * sock_to_cstr (n2n_sock_str_t out,
         char tmp[INET6_ADDRSTRLEN+1];
 
         tmp[0] = '\0';
-        inet_ntop(AF_INET6, sock->addr.v6, tmp, sizeof(n2n_sock_str_t));
+        inet_ntop(AF_INET6, sock->addr.v6, tmp, sizeof(tmp));
         snprintf(out, N2N_SOCKBUF_SIZE, "[%s]:%hu", tmp[0] ? tmp : "", sock->port);
         return out;
     } else {

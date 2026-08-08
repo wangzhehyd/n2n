@@ -141,6 +141,7 @@ LINT_CCODE=\
 	tools/tests-compress.c \
 	tools/tests-elliptic.c \
 	tools/tests-hashing.c \
+	tools/tests-ipv6.c \
 	tools/tests-transform.c \
 	tools/tests-wire.c \
 

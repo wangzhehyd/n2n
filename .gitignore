@@ -1,4 +1,5 @@
 *.o
+*.d
 *.a
 *.gz
 *.exe
@@ -34,6 +35,7 @@ tools/tests-auth
 tools/tests-compress
 tools/tests-elliptic
 tools/tests-hashing
+tools/tests-ipv6
 tools/tests-transform
 tools/tests-wire
 

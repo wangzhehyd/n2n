@@ -50,6 +50,11 @@ You can create your own infrastructure by setting up a supernode on a public ser
 
 Now the supernode service should be up and running on port 1234. On your edge nodes you can now specify `-l your_supernode_ip:1234` to use it. All the edge nodes must use the same supernode.
 
+For an IPv6-only supernode, bind it with `-p [::]:1234` and configure each edge
+with bracket notation, for example `-l [2001:db8::10]:1234`. The IPv6 address is
+used by the underlying n2n transport; edge TAP interfaces may continue to use
+ordinary IPv4 addresses such as `192.168.100.2` and `192.168.100.3`.
+
 
 ## Manual Compilation
 

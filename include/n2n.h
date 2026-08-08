@@ -140,7 +140,9 @@ uint32_t bitlen2mask (uint8_t bitlen);
 uint8_t mask2bitlen (uint32_t mask);
 char* macaddr_str (macstr_t buf, const n2n_mac_t mac);
 int str2mac (uint8_t * outmac /* 6 bytes */, const char * s);
-int supernode2sock (n2n_sock_t * sn, const n2n_sn_name_t addrIn);
+int supernode2sock (n2n_sock_t * sn, const char * addrIn);
+int parse_bind_address (n2n_sock_t * sock, const char * spec,
+                        uint16_t default_port, uint8_t default_family);
 uint8_t is_multi_broadcast (const n2n_mac_t dest_mac);
 uint8_t is_broadcast (const n2n_mac_t dest_mac);
 uint8_t is_null_mac (const n2n_mac_t dest_mac);
@@ -157,6 +159,7 @@ char* sock_to_cstr (n2n_sock_str_t out,
                     const n2n_sock_t * sock);
 char * ip_subnet_to_str (dec_ip_bit_str_t buf, const n2n_ip_subnet_t *ipaddr);
 SOCKET open_socket (int local_port, in_addr_t address, int type);
+SOCKET open_socket_bind (const n2n_sock_t * local_address, int type);
 int sock_equal (const n2n_sock_t * a,
                 const n2n_sock_t * b);
 
@@ -208,7 +211,7 @@ int comm_init (struct sn_community *comm, char *cmn);
 int sn_init_defaults (n2n_sn_t *sss);
 void sn_init (n2n_sn_t *sss);
 void sn_term (n2n_sn_t *sss);
-int supernode2sock (n2n_sock_t * sn, const n2n_sn_name_t addrIn);
+int supernode2sock (n2n_sock_t * sn, const char * addrIn);
 struct peer_info* add_sn_to_list_by_mac_or_sock (struct peer_info **sn_list, n2n_sock_t *sock, const n2n_mac_t mac, int *skip_add);
 int run_sn_loop (n2n_sn_t *sss);
 int assign_one_ip_subnet (n2n_sn_t *sss, struct sn_community *comm);

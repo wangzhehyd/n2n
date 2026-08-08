@@ -677,7 +677,8 @@ typedef struct n2n_edge_conf {
     char                     *encrypt_key;
     int                      register_interval;      /**< Interval for supernode registration, also used for UDP NAT hole punching. */
     int                      register_ttl;           /**< TTL for registration packet when UDP NAT hole punching through supernode. */
-    in_addr_t                bind_address;           /**< The address to bind to if provided */
+    in_addr_t                bind_address;           /**< Legacy IPv4 bind address (host order) */
+    n2n_sock_t               bind_sock;              /**< Address family/address used by the main transport socket */
     n2n_sock_t               preferred_sock;         /**< propagated local sock for better p2p in LAN (-e) */
     uint8_t                  preferred_sock_auto;    /**< indicates desired auto detect for preferred sock */
     int                      local_port;
@@ -723,6 +724,7 @@ struct n2n_edge {
     /* Sockets */
     /* supernode socket is in        eee->curr_sn->sock (of type n2n_sock_t) */
     int                              sock;
+    uint8_t                          sock_family;     /**< Address family of the main transport socket */
     int                              close_socket_counter;               /**< counter for close-event before re-opening */
     int                              udp_mgmt_sock;                      /**< socket for status info. */
 
@@ -840,10 +842,12 @@ typedef struct n2n_sn {
     sn_stats_t                             stats;
     int                                    daemon;          /* If non-zero then daemonise. */
     n2n_mac_t                              mac_addr;
-    in_addr_t                              bind_address;    /* The address to bind to if provided */
+    in_addr_t                              bind_address;    /* Legacy IPv4 bind address (host order) */
+    n2n_sock_t                             bind_sock;       /* Main transport bind address */
     uint16_t                               lport;           /* Local UDP port to bind to. */
     uint16_t                               mport;           /* Management UDP port to bind to. */
     int                                    sock;            /* Main socket for UDP traffic with edges. */
+    uint8_t                                sock_family;     /* Address family of the main socket. */
     int                                    tcp_sock;        /* auxiliary socket for optional TCP connections */
     n2n_tcp_connection_t                   *tcp_connections;/* list of established TCP connections */
     int                                    mgmt_sock;       /* management socket. */

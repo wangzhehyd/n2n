@@ -24,6 +24,7 @@ TESTS+=tests-hashing$(EXE)
 TESTS+=tests-transform$(EXE)
 TESTS+=tests-wire$(EXE)
 TESTS+=tests-auth$(EXE)
+TESTS+=tests-ipv6$(EXE)
 
 .PHONY: all clean install
 all: $(TOOLS) $(TESTS)
@@ -47,6 +48,7 @@ tests-hashing.exe: tests-hashing
 tests-transform.exe: tests-transform
 tests-wire.exe: tests-wire
 tests-auth.exe: tests-auth
+tests-ipv6.exe: tests-ipv6
 endif
 
 # See comments in the topdir Makefile about how to generate coverage

@@ -1,0 +1,7 @@
+IPv4 endpoint parsing: PASS
+IPv6 endpoint parsing: PASS
+IPv6 bracket validation: PASS
+IPv6 bind parsing: PASS
+IPv4-mapped IPv6 conversion: PASS
+Dual-stack UDP receive: PASS
+IPv6 UDP receive: PASS

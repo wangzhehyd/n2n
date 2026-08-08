@@ -688,6 +688,7 @@ int fill_sockaddr (struct sockaddr * addr,
     if(AF_INET == sock->family) {
         if(addrlen >= sizeof(struct sockaddr_in)) {
             struct sockaddr_in * si = (struct sockaddr_in *)addr;
+            memset(si, 0, sizeof(*si));
             si->sin_family = sock->family;
             si->sin_port = htons(sock->port);
             memcpy(&(si->sin_addr.s_addr), sock->addr.v4, IPV4_SIZE);
@@ -697,6 +698,7 @@ int fill_sockaddr (struct sockaddr * addr,
     if(AF_INET6 == sock->family) {
         if(addrlen >= sizeof(struct sockaddr_in6)) {
             struct sockaddr_in6 * si = (struct sockaddr_in6 *)addr;
+            memset(si, 0, sizeof(*si));
             si->sin6_family = sock->family;
             si->sin6_port = htons(sock->port);
             memcpy(&(si->sin6_addr.s6_addr), sock->addr.v6, IPV6_SIZE);
@@ -708,9 +710,58 @@ int fill_sockaddr (struct sockaddr * addr,
 }
 
 
+socklen_t fill_sockaddr_for_family (struct sockaddr * addr,
+                                    size_t addrlen,
+                                    const n2n_sock_t * sock,
+                                    int socket_family) {
+
+    static const uint8_t ipv4_mapped_prefix[12] = {
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xff, 0xff
+    };
+
+    if(socket_family == sock->family) {
+        if(fill_sockaddr(addr, addrlen, sock) != 0)
+            return 0;
+
+        return (socket_family == AF_INET6) ? sizeof(struct sockaddr_in6)
+                                           : sizeof(struct sockaddr_in);
+    }
+
+    /* An IPv6 dual-stack socket addresses IPv4 peers using IPv4-mapped IPv6. */
+    if((socket_family == AF_INET6) && (sock->family == AF_INET)
+       && (addrlen >= sizeof(struct sockaddr_in6))) {
+        struct sockaddr_in6 *si6 = (struct sockaddr_in6 *)addr;
+
+        memset(si6, 0, sizeof(*si6));
+        si6->sin6_family = AF_INET6;
+        si6->sin6_port = htons(sock->port);
+        si6->sin6_addr.s6_addr[10] = 0xff;
+        si6->sin6_addr.s6_addr[11] = 0xff;
+        memcpy(&si6->sin6_addr.s6_addr[12], sock->addr.v4, IPV4_SIZE);
+        return sizeof(struct sockaddr_in6);
+    }
+
+    /* A mapped address can also be used on an IPv4-only socket. */
+    if((socket_family == AF_INET) && (sock->family == AF_INET6)
+       && (addrlen >= sizeof(struct sockaddr_in))
+       && !memcmp(sock->addr.v6, ipv4_mapped_prefix, sizeof(ipv4_mapped_prefix))) {
+        struct sockaddr_in *si = (struct sockaddr_in *)addr;
+
+        memset(si, 0, sizeof(*si));
+        si->sin_family = AF_INET;
+        si->sin_port = htons(sock->port);
+        memcpy(&si->sin_addr.s_addr, &sock->addr.v6[12], IPV4_SIZE);
+        return sizeof(struct sockaddr_in);
+    }
+
+    return 0;
+}
+
+
 // fills struct sockaddr's data into n2n_sock
 int fill_n2nsock (n2n_sock_t* sock, const struct sockaddr* sa) {
 
+    memset(sock, 0, sizeof(*sock));
     sock->family = sa->sa_family;
 
     switch(sock->family) {
@@ -720,8 +771,15 @@ int fill_n2nsock (n2n_sock_t* sock, const struct sockaddr* sa) {
             break;
         }
         case AF_INET6: {
-            sock->port = ntohs(((struct sockaddr_in6*)sa)->sin6_port);
-            memcpy(sock->addr.v6, &((struct sockaddr_in6*)sa)->sin6_addr.s6_addr, sizeof(struct in6_addr));
+            const struct sockaddr_in6 *si6 = (const struct sockaddr_in6 *)sa;
+
+            sock->port = ntohs(si6->sin6_port);
+            if(IN6_IS_ADDR_V4MAPPED(&si6->sin6_addr)) {
+                sock->family = AF_INET;
+                memcpy(sock->addr.v4, &si6->sin6_addr.s6_addr[12], IPV4_SIZE);
+            } else {
+                memcpy(sock->addr.v6, &si6->sin6_addr.s6_addr, sizeof(struct in6_addr));
+            }
             break;
         }
         default:

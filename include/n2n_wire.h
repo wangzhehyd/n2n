@@ -201,6 +201,11 @@ int fill_sockaddr (struct sockaddr * addr,
                    size_t addrlen,
                    const n2n_sock_t * sock);
 
+socklen_t fill_sockaddr_for_family (struct sockaddr * addr,
+                                    size_t addrlen,
+                                    const n2n_sock_t * sock,
+                                    int socket_family);
+
 int fill_n2nsock (n2n_sock_t* sock,
                   const struct sockaddr* sa);
 

@@ -290,6 +290,7 @@ static void help (int level) {
         printf(" -l <host:port>    | supernode ip address or name, and port\n");
         printf(" -p [<ip>:]<port>  | fixed local UDP port and optionally bind to the\n"
                "                   | sepcified local IP address only (any by default)\n");
+        printf("                   | use '[<IPv6>]:<port>' for an IPv6 bind address\n");
 #ifdef __linux__
         printf(" -T <tos>          | TOS for packets, e.g. 0x48 for SSH like priority\n");
 #endif
@@ -634,33 +635,17 @@ static int setOption (int optkey, char *optargument, n2n_tuntap_priv_config_t *e
         }
 
         case 'p': {
-            char* colon = strpbrk(optargument, ":");
-            if(colon) { /*ip address:port */
-                *colon = 0;
-                conf->bind_address = ntohl(inet_addr(optargument));
-                conf->local_port = atoi(++colon);
+            uint32_t bind_address_v4;
 
-                if(conf->bind_address == INADDR_NONE) {
-                    traceEvent(TRACE_WARNING, "bad address to bind to, binding to any IP address");
-                    conf->bind_address = INADDR_ANY;
-                }
-                if(conf->local_port == 0) {
-                    traceEvent(TRACE_WARNING, "bad local port format, using OS assigned port");
-                }
-            } else { /* ip address or port only */
-                char* dot = strpbrk(optargument, ".");
-                if(dot) { /* ip address only */
-                    conf->bind_address = ntohl(inet_addr(optargument));
-                    if(conf->bind_address == INADDR_NONE) {
-                        traceEvent(TRACE_WARNING, "bad address to bind to, binding to any IP address");
-                        conf->bind_address = INADDR_ANY;
-                    }
-                } else { /* port only */
-                    conf->local_port = atoi(optargument);
-                     if(conf->local_port == 0) {
-                        traceEvent(TRACE_WARNING, "bad local port format, using OS assigned port");
-                    }
-                }
+            if(parse_bind_address(&conf->bind_sock, optargument,
+                                  conf->local_port, AF_UNSPEC) != 0) {
+                traceEvent(TRACE_WARNING, "bad local bind address '%s'", optargument);
+                return 2;
+            }
+            conf->local_port = conf->bind_sock.port;
+            if(conf->bind_sock.family == AF_INET) {
+                memcpy(&bind_address_v4, conf->bind_sock.addr.v4, IPV4_SIZE);
+                conf->bind_address = ntohl(bind_address_v4);
             }
             break;
         }
