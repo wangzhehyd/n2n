@@ -31,7 +31,8 @@ if [ -d "$TOPDIR/.git" ]; then
 
     VER_SHORT="$VER_GIT_SHORT"
     VER_HASH=$(git rev-parse --short HEAD)
-    VER=$(git describe --abbrev=7 --dirty)
+    # Keep the user-visible package version stable across development commits.
+    VER="$VER_SHORT"
     DATE=$(git log -1 --format=%cd)
 else
     # If there is no .git directory in our TOPDIR, we fall back on relying on
